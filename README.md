@@ -15,7 +15,7 @@ codescanner.py --repo-url "github URL to scan"
 
 The data flow analysis part of the code is only looking for .java and .js files. The test project only uses those so this would need some modification for other languages that Bearer supports.
 
-Be aware in it's current format it will automatically submit a PR with code changes to the project once a scan has completed. Procedure with caution on that part! 
+Be aware in it's current format it will automatically submit a PR with code changes to the project once a scan has completed. Procede with caution on that part! Also, please don't blindly trust the suggested fix. Review it like you would any other changes.
 
 The images below show Bearer finding a vulnerability in the vulnerable application, we share the finding and code with ChatGPT for true/false positive analysis, as this was a true positive a code fix is applied and an explanation of why it fixes the issue is provided. 
 
