@@ -9,7 +9,7 @@ To use the script you will need to install Bearer, have an OpenAI API or Claude 
 
 ```
 
-codescanner.py --repo-url "github URL to scan"
+codescanner.py --repo-url "github URL to scan" or codescanner_claude.py --repo-url "github URL to scan"
 
 ```
 
