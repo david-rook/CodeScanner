@@ -19,7 +19,7 @@ Be aware in it's current format it will automatically submit a PR with code chan
 
 The images below show Bearer finding a vulnerability in the vulnerable application, we share the finding and code with ChatGPT and Claude for true/false positive analysis, as this was a true positive a code fix is applied and an explanation of why it fixes the issue is provided. 
 
-<img width="741" height="145" alt="AISec1" src="https://github.com/user-attachments/assets/2e473d64-e54a-454e-b9f8-75ab21b3c2c2" />
-<img width="1566" height="797" alt="AISec2" src="https://github.com/user-attachments/assets/5365586e-7bed-447f-b5f9-fac00422b1b2" />
-<img width="1528" height="567" alt="AISec3" src="https://github.com/user-attachments/assets/d31af47b-9490-4dbd-9af6-46a11296d231" />
-<img width="1532" height="273" alt="AISec4" src="https://github.com/user-attachments/assets/017bcb6b-2537-4c77-9ab4-c5c5f963cddc" />
+
+<img width="1344" height="834" alt="ClaudeAI1" src="https://github.com/user-attachments/assets/9df3c73e-7345-49ab-a75d-8ba610372de5" />
+<img width="1315" height="581" alt="ClaudeAI2" src="https://github.com/user-attachments/assets/d0a17865-261b-4205-8d46-bed9eed87296" />
+<img width="1315" height="684" alt="ClaudeAI3" src="https://github.com/user-attachments/assets/c00ea65a-07fc-4577-9521-dd17fadf2907" />
