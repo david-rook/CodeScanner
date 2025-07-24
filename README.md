@@ -5,7 +5,7 @@
 
 I put this together to test a theory I had. I wanted to see if we could scan a codebase using a static analysis tool, share the findings and code with the ChatGPT and Claude for analysis and then turn the analysis into suggested code changes. Using the [Bearer SAST](https://github.com/Bearer/bearer) tool and and a few intentionally vulnerable applications this has been proved to be a potential use for AI in security reviews. 
 
-To use the script you will need to install Bearer, have an OpenAI API or Claude API key and a relevant GitHub PAT in config.properties and run this command:
+To use the script you will need to install Bearer, have an OpenAI API or Claude API key and a relevant GitHub PAT in config.properties or claudepconfig.properties and run this command:
 
 ```
 
