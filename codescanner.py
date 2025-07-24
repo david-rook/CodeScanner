@@ -4,8 +4,9 @@ import os
 import glob
 import requests
 import argparse
+import sys
+import time
 from openai import OpenAI
-
 from configparser import ConfigParser
 
 # Load config
@@ -21,8 +22,6 @@ parser.add_argument("--repo-url", required=True, help="GitHub repository URL (e.
 args = parser.parse_args()
 
 repo_url = args.repo_url.rstrip("/")
-
-# Inject token into URL
 if github_token and "@" not in repo_url:
     repo_url = repo_url.replace("https://", f"https://{github_token}@")
 
@@ -30,10 +29,9 @@ repo_parts = repo_url.split("/")
 repo_owner = repo_parts[-2]
 repo_name = repo_parts[-1].replace(".git", "")
 default_branch = "main"
-
 local_path = os.path.join(os.getcwd(), repo_name)
 
-# Clone repo
+# Clone or update repo
 if not os.path.exists(local_path):
     print("Cloning repo...")
     subprocess.run(["git", "clone", repo_url], check=True)
@@ -42,20 +40,37 @@ else:
     subprocess.run(["git", "-C", local_path, "checkout", default_branch], check=True)
     subprocess.run(["git", "-C", local_path, "pull", "origin", default_branch], check=True)
 
-# Run Bearer scan
+# === Generate AST ===
+print("Generating unified AST using external script...")
+venv_python = os.path.join(os.getcwd(), "venv311", "bin", "python")
+ast_script_path = os.path.join(os.getcwd(), "generate_asts.py")
+
+if not os.path.exists(venv_python):
+    raise RuntimeError(f"❌ Python interpreter for AST venv not found: {venv_python}")
+subprocess.run([venv_python, ast_script_path, local_path], check=True)
+
+ast_path = os.path.join(os.getcwd(), "project.ast.json")
+if os.path.exists(ast_path):
+    with open(ast_path, "r", encoding="utf-8") as f:
+        unified_ast = json.load(f)
+
+    symbol_summary = json.dumps(unified_ast.get("symbols", {}), indent=2)[:2000]
+    ast_sample = json.dumps(unified_ast.get("files", [])[0].get("ast", {}), indent=2)[:3000]
+
+    system_prompt = (
+        "You are a static analysis and security expert. The following is the unified AST and symbol table for the project. Use this context for every analysis:\n\n"
+        f"=== Project-wide AST (sample/truncated) ===\n{ast_sample}\n\n"
+        f"=== Symbol Summary ===\n{symbol_summary}\n"
+    )
+else:
+    system_prompt = "You are a static analysis and security expert. AST context could not be loaded; proceed with best-effort manual analysis."
+
+# === Run Bearer scan ===
 print("Running Bearer scan...")
-
 scan_output_file = os.path.join(local_path, "scan-result.json")
-
 scan_command = [
-    "bearer",
-    "scan",
-    local_path,
-    "--force",
-    "--format",
-    "json",
-    "--output",
-    scan_output_file
+    "bearer", "scan", local_path,
+    "--force", "--format", "json", "--output", scan_output_file
 ]
 
 result = subprocess.run(scan_command, capture_output=True, text=True)
@@ -64,7 +79,7 @@ print(result.stdout)
 if result.returncode != 0:
     print("Bearer scan finished with findings. Processing results.")
 else:
-    print("\n Bearer scan completed and saved.")
+    print("Bearer scan completed and saved.")
 
 # Load scan results
 with open(scan_output_file, "r", encoding="utf-8") as f:
@@ -81,55 +96,15 @@ if not combined_findings:
 client = OpenAI(api_key=api_key)
 updated_files = set()
 
-# Data flow analysis - test project is only java and js hence the below
-def trace_data_flow(finding, file_content, local_file_path, client):
-    files_to_include = [local_file_path]
-    additional_files = glob.glob(os.path.join(os.path.dirname(local_file_path), "*.java"))
-    additional_files += glob.glob(os.path.join(os.path.dirname(local_file_path), "*.js"))
-    additional_files = list(set(additional_files))
-    if local_file_path in additional_files:
-        additional_files.remove(local_file_path)
-    files_to_include += additional_files
+# === Shared chat thread ===
+messages = [
+    {
+        "role": "system",
+        "content": system_prompt
+    }
+]
 
-    project_files_content = ""
-    for file in files_to_include:
-        if not os.path.isfile(file):
-            continue
-        with open(file, "r", encoding="utf-8", errors="ignore") as f:
-            content = f.read()
-            project_files_content += f"\n\n---\n### File: {file}\n\n```java\n{content}\n```"
-
-    finding_text = f"{json.dumps(finding, indent=2)}"
-    analysis_prompt = (
-        f"You are a static analysis and security expert.\n\n"
-        f"## Vulnerability Finding\n{finding_text}\n\n"
-        f"## Vulnerable File Content\n```java\n{file_content}\n```\n\n"
-        f"## Project Files\n{project_files_content}\n\n"
-        f"Please describe the data flow from source to sink step by step, identify intermediate functions and variables, "
-        f"and conclude whether this is a true or false positive and why. "
-        f"In addition, generate a Mermaid diagram inside a ```mermaid block that shows this data flow. "
-        f"Finally, at the end of your analysis, add a heading '### Determination' and write exactly one line: either 'This is a TRUE positive.' or 'This is a FALSE positive.'"
-    )
-
-    messages = [
-        {"role": "system", "content": "You are a static analysis and security expert."},
-        {"role": "user", "content": analysis_prompt}
-    ]
-
-    response = client.chat.completions.create(
-        model="gpt-4o",
-        messages=messages
-    )
-
-    analysis_response = response.choices[0].message.content.strip()
-    analysis_file_path = local_file_path + "_dataflow.md"
-
-    with open(analysis_file_path, "w", encoding="utf-8") as f:
-        f.write(analysis_response)
-
-    return analysis_file_path
-
-# Review and suggest fix
+# === Main loop ===
 for idx, finding in enumerate(combined_findings, start=1):
     rel_file_path = finding.get("full_filename")
     if not rel_file_path:
@@ -149,109 +124,105 @@ for idx, finding in enumerate(combined_findings, start=1):
     with open(local_file_path, "r", encoding="utf-8", errors="ignore") as code_file:
         original_file_content = code_file.read()
 
-    dataflow_file_path = trace_data_flow(finding, original_file_content, local_file_path, client)
-    print(f"🔬 Data flow analysis written to: {dataflow_file_path}")
-    updated_files.add(dataflow_file_path)
+    finding_text = json.dumps(finding, indent=2)
+    prompt = (
+        f"Analyze the following vulnerability finding:\n\n"
+        f"=== Finding ===\n{finding_text}\n\n"
+        f"=== Vulnerable File Content ===\n```java\n{original_file_content}\n```\n\n"
+        f"Using the AST describe the data flow from source to sink, determine TRUE or FALSE positive, and explain why you came to this conclusions from looking at the code and AST. "
+        f"Also include a Mermaid diagram if possible. End with '### Determination' and either 'This is a TRUE positive.' or 'This is a FALSE positive.'"
+    )
 
-    with open(dataflow_file_path, "r", encoding="utf-8") as f_df:
-        df_content = f_df.read().lower()
+    messages.append({"role": "user", "content": prompt})
 
-    determination_line = None
-    for line in df_content.splitlines():
-        if line.strip().startswith("this is a true positive.") or line.strip().startswith("this is a false positive."):
-            determination_line = line.strip()
-            break
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=messages
+        )
+    except Exception as e:
+        print(f"❌ Error during OpenAI request: {e}")
+        break
+
+    reply = response.choices[0].message.content
+    analysis_path = local_file_path + "_dataflow.md"
+
+    with open(analysis_path, "w", encoding="utf-8") as f:
+        f.write(reply)
+
+    print(f"🔬 Data flow analysis written to: {analysis_path}")
+    updated_files.add(analysis_path)
+
+    determination_line = next((line.strip().lower() for line in reply.splitlines() if "this is a true positive." in line.lower() or "this is a false positive." in line.lower()), None)
 
     if determination_line == "this is a false positive.":
-        print(f"Skipping code fix for: {rel_file_path} (determined to be false positive)")
+        print(f"Skipping fix for {rel_file_path} (determined FALSE positive)")
+        for _ in range(min(2, len(messages))):
+            messages.pop()
         continue
 
-    finding_text = (
-        f"=== Finding Details ===\n"
-        f"{json.dumps(finding, indent=2)}\n\n"
-        f"=== Full file content ===\n{original_file_content}\n\n"
+    # Ask for a fix
+    fix_prompt = (
+        f"Please provide a secure, corrected version of this file based on the vulnerability above. "
+        f"Only return the corrected code first. Then under '## Analysis' give a brief explanation."
     )
 
-    messages = [
-        {
-            "role": "system",
-            "content": "You are a security expert and senior software engineer. Please provide a secure, corrected version of the file code based on the described vulnerabilities. Reply ONLY with the corrected code. Then separately provide a short markdown analysis summary under '## Analysis' heading."
-        },
-        {
-            "role": "user",
-            "content": finding_text
-        }
-    ]
-
-    response = client.chat.completions.create(
-        model="gpt-4o",
-        messages=messages
-    )
-
-    answer = response.choices[0].message.content.strip()
+    messages.append({"role": "user", "content": fix_prompt})
+    response = client.chat.completions.create(model="gpt-4o", messages=messages)
+    answer = response.choices[0].message.content
 
     if "## Analysis" in answer:
         corrected_code, analysis = answer.split("## Analysis", 1)
         analysis = "## Analysis" + analysis
     else:
         corrected_code = answer
-        analysis = "## Analysis\nNo additional analysis provided."
+        analysis = "## Analysis\nNo additional explanation provided."
 
-    if corrected_code and corrected_code.strip() != original_file_content.strip():
-        with open(local_file_path, "w", encoding="utf-8") as f_out:
-            f_out.write(corrected_code.strip())
+    if corrected_code.strip() != original_file_content.strip():
+        with open(local_file_path, "w", encoding="utf-8") as f:
+            f.write(corrected_code.strip())
         updated_files.add(rel_file_path)
-        print(f"Applied suggested fix to: {rel_file_path}")
+        print(f"✅ Fix applied to: {rel_file_path}")
 
-        analysis_file_path = local_file_path + "_analysis.md"
-        with open(analysis_file_path, "w", encoding="utf-8") as f_md:
-            f_md.write(analysis.strip())
-        updated_files.add(analysis_file_path)
-        print(f"Analysis file created: {analysis_file_path}")
+        with open(local_file_path + "_analysis.md", "w", encoding="utf-8") as f:
+            f.write(analysis)
+        print("📄 Analysis saved.")
     else:
-        print(f"No changes suggested for: {rel_file_path}")
+        print(f"No fix required for: {rel_file_path}")
 
-# Commit & push
+    # Trim message history safely
+    for _ in range(min(4, len(messages))):
+        messages.pop()
+    time.sleep(1.2)
+
+# === Commit & PR ===
 branch_name = "ai/suggested-security-fixes"
 
 if updated_files:
-    result = subprocess.run(
-        ["git", "-C", local_path, "branch", "--list", branch_name],
-        stdout=subprocess.PIPE,
-        text=True
-    )
-
+    result = subprocess.run(["git", "-C", local_path, "branch", "--list", branch_name], stdout=subprocess.PIPE, text=True)
     if result.stdout.strip():
-        print(f"Branch '{branch_name}' already exists. Checking it out...")
         subprocess.run(["git", "-C", local_path, "checkout", branch_name], check=True)
     else:
-        print(f"Creating new branch '{branch_name}'...")
         subprocess.run(["git", "-C", local_path, "checkout", "-b", branch_name], check=True)
 
     subprocess.run(["git", "-C", local_path, "add", "."], check=True)
     subprocess.run(["git", "-C", local_path, "commit", "-m", "Apply AI-suggested security fixes"], check=True)
-
-    print("Force pushing branch...")
     subprocess.run(["git", "-C", local_path, "push", "-u", "origin", branch_name, "--force"], check=True)
-
-    headers = {"Authorization": f"token {github_token}"}
-    pr_body = "This PR includes AI-suggested security fixes, analysis markdown files, and detailed data flow traces. Please review carefully."
 
     pr_data = {
         "title": "AI-applied security fixes, analysis, and data flow traces",
         "head": branch_name,
         "base": default_branch,
-        "body": pr_body
+        "body": "This PR includes AI-suggested security fixes and analysis for critical/high findings."
     }
 
+    headers = {"Authorization": f"token {github_token}"}
     url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/pulls"
     response = requests.post(url, json=pr_data, headers=headers)
 
     if response.status_code == 201:
-        pr_url = response.json()["html_url"]
-        print(f"✅ Pull request created: {pr_url}")
+        print(f"✅ Pull request created: {response.json()['html_url']}")
     else:
         print(f"❌ Failed to create PR: {response.status_code}")
-        print(response.text)
 else:
-    print("No actual code changes detected. Nothing to commit or push.")
+    print("No changes to commit.")
